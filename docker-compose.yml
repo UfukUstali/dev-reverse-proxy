@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  proxy-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dev-proxy-server
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - CONFIG_DIR=/config
+    volumes:
+      - traefik-config:/config
+    networks:
+      - proxy-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  traefik:
+    image: traefik:v3.0
+    container_name: dev-traefik
+    command:
+      - "--api.insecure=true"
+      - "--providers.file.directory=/config"
+      - "--providers.file.watch=true"
+      - "--entrypoints.web.address=:80"
+      - "--log.level=INFO"
+    ports:
+      - "80:80"
+      - "8081:8080"
+    volumes:
+      - traefik-config:/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - proxy-network
+    depends_on:
+      - proxy-server
+
+volumes:
+  traefik-config:
+
+networks:
+  proxy-network:
+    driver: bridge
