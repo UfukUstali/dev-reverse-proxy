@@ -31,9 +31,10 @@ curl -sf -X POST "$SERVER/register" \
   -H "Content-Type: application/json" \
   -d "{\"id\":\"$ID\",\"port\":$PORT}" >/dev/null
 
+parent_pid=$$
 heartbeat() {
-  while :; do
-    sleep 10
+  while kill -0 "$parent_pid" 2>/dev/null; do
+    sleep 2
     curl -s -X POST "$SERVER/heartbeat?id=$ID" >/dev/null
   done
 }

@@ -23,9 +23,9 @@ type Client struct {
 
 type TraefikConfig struct {
 	HTTP struct {
-		Routers  map[string]Router  `yaml:"routers"`
-		Services map[string]Service `yaml:"services"`
-	} `yaml:"http"`
+		Routers  map[string]Router  `yaml:"routers,omitempty"`
+		Services map[string]Service `yaml:"services,omitempty"`
+	} `yaml:"http,omitempty"`
 }
 
 type Router struct {
@@ -228,7 +228,7 @@ func (sm *ServerManager) handleUnregister(w http.ResponseWriter, r *http.Request
 }
 
 func (sm *ServerManager) checkHeartbeats() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -340,7 +340,7 @@ func main() {
 		log.Fatalf("Failed to create config directory: %v", err)
 	}
 
-	heartbeatTimeout := 30 * time.Second
+	heartbeatTimeout := 5 * time.Second
 	if timeout := os.Getenv("HEARTBEAT_TIMEOUT"); timeout != "" {
 		if d, err := time.ParseDuration(timeout); err == nil {
 			heartbeatTimeout = d
