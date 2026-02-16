@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"math/rand"
 	"net"
@@ -17,45 +18,43 @@ import (
 	"time"
 )
 
+type Config struct {
+	Server string
+	ID     string
+	Port   int
+}
+
 func main() {
-	server := getenv("SERVER", "http://localhost:8080")
-	id := getenv("ID", "myapp")
+	cfg, userCmd := parseArgs()
 
-	portStr := os.Getenv("PORT")
-	var port int
-	var err error
+	if cfg.Server == "" {
+		cfg.Server = getenv("SERVER", "http://localhost:8080")
+	}
+	if cfg.ID == "" {
+		cfg.ID = getenv("ID", "myapp")
+	}
 
-	if portStr == "" {
-		port, err = findFreePort(3000, 3100, 50)
+	if cfg.Port == 0 {
+		port, err := findFreePort(3000, 3100, 50)
 		if err != nil {
 			fmt.Println("Failed to find free port in range 3000–3100")
 			os.Exit(1)
 		}
-	} else {
-		port, err = strconv.Atoi(portStr)
-		if err != nil {
-			fmt.Println("Invalid PORT")
-			os.Exit(1)
-		}
+		cfg.Port = port
 	}
 
-	os.Setenv("PORT", strconv.Itoa(port))
+	os.Setenv("PORT", strconv.Itoa(cfg.Port))
 
-	if len(os.Args) < 2 {
-		fmt.Println("No command provided")
-		os.Exit(1)
-	}
-
-	if err := register(server, id, port); err != nil {
+	if err := register(cfg.Server, cfg.ID, cfg.Port); err != nil {
 		os.Exit(1)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go heartbeat(ctx, server, id)
+	go heartbeat(ctx, cfg.Server, cfg.ID)
 
-	cmd := exec.Command(os.Args[1], os.Args[2:]...)
+	cmd := exec.Command(userCmd[0], userCmd[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
@@ -71,7 +70,7 @@ func main() {
 		}
 	}()
 
-	err = cmd.Run()
+	err := cmd.Run()
 	cancel()
 
 	if err != nil {
@@ -80,6 +79,53 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+func parseArgs() (Config, []string) {
+	var cfg Config
+
+	flag.StringVar(&cfg.Server, "server", "", "Server URL (default: http://localhost:8080)")
+	flag.StringVar(&cfg.Server, "s", "", "Server URL (shorthand)")
+	flag.StringVar(&cfg.ID, "id", "", "Client identifier (subdomain)")
+	flag.StringVar(&cfg.ID, "i", "", "Client identifier (shorthand)")
+	flag.IntVar(&cfg.Port, "port", 0, "Port number (auto-selected if not set)")
+	flag.IntVar(&cfg.Port, "p", 0, "Port number (shorthand)")
+
+	flag.Parse()
+
+	args := flag.Args()
+	if len(args) == 0 {
+		fmt.Println("Usage: client [options] -- <command> [args...]")
+		fmt.Println("\nOptions:")
+		flag.PrintDefaults()
+		fmt.Println("\nExamples:")
+		fmt.Println("  client -s http://localhost:8080 -i myapp -- npm run dev")
+		fmt.Println("  client --server http://localhost:8080 --id api -p 3035 -- node server.js")
+		fmt.Println("  SERVER=http://localhost:8080 ID=api client -- node server.js")
+		os.Exit(1)
+	}
+
+	delimIdx := -1
+	for i, arg := range args {
+		if arg == "--" {
+			delimIdx = i
+			break
+		}
+	}
+
+	var userCmd []string
+	if delimIdx >= 0 {
+		userCmd = args[delimIdx+1:]
+	} else {
+		userCmd = args
+	}
+
+	if len(userCmd) == 0 {
+		fmt.Println("No command provided after options")
+		os.Exit(1)
+	}
+
+	return cfg, userCmd
 }
 
 func getenv(k, def string) string {
@@ -91,6 +137,13 @@ func getenv(k, def string) string {
 }
 
 func findFreePort(min, max, attempts int) (int, error) {
+	v := os.Getenv("PORT")
+	if v != "" {
+		p, err := strconv.Atoi(v)
+		if err == nil {
+			return p, nil
+		}
+	}
 	for range attempts {
 		p := min + rand.Intn(max-min+1)
 		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
