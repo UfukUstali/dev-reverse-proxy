@@ -6,8 +6,8 @@ A development reverse proxy that exposes local applications on custom subdomains
 
 ```
 ┌─────────────┐     HTTP POST      ┌─────────────────┐
-│  client.sh  │ ──────────────────>│   Go Server     │
-│  (wrapper)  │   /register        │  (Port 8080)    │
+│   client    │ ──────────────────>│   Go Server     │
+│  (Go binary)│   /register        │  (Port 8080)    │
 └─────────────┘                    └────────┬────────┘
        │                                    │
        │ POST /heartbeat (every 10s)        │ Writes config
@@ -47,42 +47,50 @@ This starts:
 ### 2. Run any command with subdomain
 
 ```bash
-ID=myapp ./client.sh npm run dev
-ID=api PORT=3045 ./client.sh pnpm run dev --host 0.0.0.0
+./client -i myapp -- npm run dev
+./client -i api -p 3045 -- pnpm run dev --host 0.0.0.0
 ```
 
 ### 3. Access your app
 
 Open http://myapp.localhost in your browser.
 
-## client.sh Usage
+## Client Usage
 
 ```bash
-./client.sh <command> [args...]
+./client [options] -- <command> [args...]
 
-Environment Variables:
+Options:
+  -s, --server URL   Server URL (default: http://localhost:8080)
+  -i, --id ID       Client identifier (subdomain)
+  -p, --port PORT   Port number (auto-selected 3000-3100 if not set)
+
+Environment Variables (fallback when flags not provided):
+  SERVER   - Server URL (default: http://localhost:8080)
   ID       - Subdomain identifier (default: myapp)
   PORT     - Port number (auto-selected 3000-3100 if not set)
-  SERVER   - Server URL (default: http://localhost:8080)
 ```
 
 ### Examples
 
 ```bash
-# Use default subdomain "myapp" with auto-selected port
-./client.sh npm run dev
+# Use default subdomain with auto-selected port
+./client -- npm run dev
 
 # Specify custom subdomain
-ID=dashboard ./client.sh npm run dev
+./client -i dashboard -- npm run dev
 
 # Specify custom port
-ID=api PORT=8085 ./client.sh node server.js
+./client -i api -p 8085 -- node server.js
+
+# Use environment variables
+ID=api PORT=8085 ./client -- node server.js
 
 # Three-level subdomain (sub.foo.bar.localhost)
-ID=prod.api.service ./client.sh npm run dev
+./client -i prod.api.service -- npm run dev
 
-# Full environment variable usage
-ID=frontend PORT=3000 SERVER=http://localhost:8080 ./client.sh npm start
+# Without -- delimiter (command args after flags)
+./client -s http://localhost:8080 -i myapp npm run dev
 ```
 
 ## Subdomain Validation
@@ -190,7 +198,8 @@ List all registered clients.
 .
 ├── server/
 │   └── main.go           # Go HTTP server with heartbeat
-├── client.sh             # Bash wrapper script
+├── client/
+│   └── main.go           # Go client binary
 ├── Dockerfile            # Go server container
 ├── docker-compose.yml    # Infrastructure setup
 └── Makefile              # Helper commands
@@ -198,10 +207,14 @@ List all registered clients.
 
 ## Development
 
-### Building the Go Server
+### Building
 
 ```bash
+# Build server
 go build -o server-bin ./server/
+
+# Build client
+go build -o client ./client/
 ```
 
 ### Running Locally
@@ -211,7 +224,7 @@ go build -o server-bin ./server/
 make dev-server
 
 # Terminal 2: Run client
-ID=test PORT=8085 ./client.sh python -m http.server 8085
+./client -i test -p 8085 -- python -m http.server 8085
 ```
 
 ### Docker Commands
