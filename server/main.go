@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"regexp"
 	"sync"
 	"syscall"
 	"time"
@@ -65,21 +64,12 @@ type RegisterResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
-var subdomainRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$`)
-
 func NewServerManager(configDir string, heartbeatTimeout time.Duration) *ServerManager {
 	return &ServerManager{
 		clients:          make(map[string]*Client),
 		configDir:        configDir,
 		heartbeatTimeout: heartbeatTimeout,
 	}
-}
-
-func (sm *ServerManager) validateSubdomain(subdomain string) bool {
-	if len(subdomain) == 0 || len(subdomain) > 63 {
-		return false
-	}
-	return subdomainRegex.MatchString(subdomain)
 }
 
 func (sm *ServerManager) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +89,7 @@ func (sm *ServerManager) handleRegister(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if !sm.validateSubdomain(req.ID) {
+	if !validateSubdomain(req.ID) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(RegisterResponse{
@@ -119,8 +109,10 @@ func (sm *ServerManager) handleRegister(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	internalID := toInternalID(req.ID)
+
 	sm.mu.Lock()
-	if _, exists := sm.clients[req.ID]; exists {
+	if _, exists := sm.clients[internalID]; exists {
 		sm.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
@@ -132,12 +124,12 @@ func (sm *ServerManager) handleRegister(w http.ResponseWriter, r *http.Request) 
 	}
 
 	client := &Client{
-		ID:            req.ID,
+		ID:            internalID,
 		Port:          req.Port,
 		Subdomain:     req.ID,
 		LastHeartbeat: time.Now(),
 	}
-	sm.clients[req.ID] = client
+	sm.clients[internalID] = client
 	sm.mu.Unlock()
 
 	log.Printf("Client registered: %s -> port %d", client.Subdomain, client.Port)
@@ -167,8 +159,10 @@ func (sm *ServerManager) handleHeartbeat(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	internalID := toInternalID(id)
+
 	sm.mu.Lock()
-	client, exists := sm.clients[id]
+	client, exists := sm.clients[internalID]
 	if !exists {
 		sm.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -206,8 +200,10 @@ func (sm *ServerManager) handleUnregister(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	internalID := toInternalID(id)
+
 	sm.mu.Lock()
-	_, exists := sm.clients[id]
+	_, exists := sm.clients[internalID]
 	if !exists {
 		sm.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -219,7 +215,7 @@ func (sm *ServerManager) handleUnregister(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	delete(sm.clients, id)
+	delete(sm.clients, internalID)
 	sm.mu.Unlock()
 
 	log.Printf("Client unregistered: %s", id)
@@ -273,7 +269,7 @@ func (sm *ServerManager) generateConfig() {
 
 		config.HTTP.Routers[routerName] = Router{
 			EntryPoints: []string{"web"},
-			Rule:        "Host(`" + subdomain + ".localhost`)",
+			Rule:        "Host(`" + client.Subdomain + ".localhost`)",
 			Service:     serviceName,
 		}
 
@@ -319,9 +315,10 @@ func (sm *ServerManager) getClients(w http.ResponseWriter, r *http.Request) {
 	defer sm.mu.RUnlock()
 
 	clients := make([]map[string]any, 0, len(sm.clients))
-	for id, client := range sm.clients {
+	for _, client := range sm.clients {
 		clients = append(clients, map[string]any{
-			"id":             id,
+			"id":             client.ID,
+			"domain":         client.Subdomain + ".localhost",
 			"port":           client.Port,
 			"last_heartbeat": client.LastHeartbeat.Format(time.RFC3339),
 		})
