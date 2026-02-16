@@ -6,11 +6,10 @@ import (
 )
 
 var subdomainPartRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$`)
-var maxSubdomainLevels = 3
 
 func validateSubdomain(subdomain string) bool {
 	parts := strings.Split(subdomain, ".")
-	if len(parts) == 0 || len(parts) > maxSubdomainLevels || len(subdomain) > 255 {
+	if len(parts) == 0 || len(subdomain) > 1500 {
 		return false
 	}
 	for _, part := range parts {
