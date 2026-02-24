@@ -24,6 +24,7 @@ services:
       - proxy-network
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
 
   traefik:
     image: traefik:latest
@@ -46,3 +47,4 @@ services:
       - proxy-server
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
