@@ -43,8 +43,6 @@ func main() {
 		cfg.Port = port
 	}
 
-	os.Setenv("PORT", strconv.Itoa(cfg.Port))
-
 	if err := register(cfg.Server, cfg.ID, cfg.Port); err != nil {
 		os.Exit(1)
 	}
@@ -53,6 +51,10 @@ func main() {
 	defer cancel()
 
 	go heartbeat(ctx, cfg.Server, cfg.ID)
+
+	os.Setenv("PORT", strconv.Itoa(cfg.Port))
+	os.Setenv("DEVRP_ID", cfg.ID)
+	os.Setenv("DEVRP_BASE_URL", "http://"+cfg.ID+".localhost")
 
 	cmd := exec.Command(userCmd[0], userCmd[1:]...)
 	cmd.Stdout = os.Stdout
