@@ -19,9 +19,10 @@ import (
 )
 
 type Config struct {
-	Server string
-	ID     string
-	Port   int
+	Server   string
+	ID       string
+	Port     int
+	Wildcard bool
 }
 
 func main() {
@@ -33,6 +34,9 @@ func main() {
 	if cfg.ID == "" {
 		cfg.ID = getenv("ID", "myapp")
 	}
+	if !cfg.Wildcard {
+		cfg.Wildcard = getenvBool("WILDCARD")
+	}
 
 	if cfg.Port == 0 {
 		port, err := findFreePort(3000, 3100, 50)
@@ -43,7 +47,7 @@ func main() {
 		cfg.Port = port
 	}
 
-	if err := register(cfg.Server, cfg.ID, cfg.Port); err != nil {
+	if err := register(cfg.Server, cfg.ID, cfg.Port, cfg.Wildcard); err != nil {
 		os.Exit(1)
 	}
 
@@ -92,6 +96,8 @@ func parseArgs() (Config, []string) {
 	flag.StringVar(&cfg.ID, "i", "", "Client identifier (shorthand)")
 	flag.IntVar(&cfg.Port, "port", 0, "Port number (auto-selected if not set)")
 	flag.IntVar(&cfg.Port, "p", 0, "Port number (shorthand)")
+	flag.BoolVar(&cfg.Wildcard, "wildcard", false, "Also route *.<id>.localhost to this port")
+	flag.BoolVar(&cfg.Wildcard, "w", false, "Wildcard subdomains (shorthand)")
 
 	flag.Parse()
 
@@ -138,6 +144,14 @@ func getenv(k, def string) string {
 	return v
 }
 
+func getenvBool(k string) bool {
+	switch os.Getenv(k) {
+	case "1", "true", "TRUE", "True", "yes", "on":
+		return true
+	}
+	return false
+}
+
 func findFreePort(min, max, attempts int) (int, error) {
 	v := os.Getenv("PORT")
 	if v != "" {
@@ -157,10 +171,11 @@ func findFreePort(min, max, attempts int) (int, error) {
 	return 0, errors.New("no free port found")
 }
 
-func register(server, id string, port int) error {
+func register(server, id string, port int, wildcard bool) error {
 	payload := map[string]any{
-		"id":   id,
-		"port": port,
+		"id":       id,
+		"port":     port,
+		"wildcard": wildcard,
 	}
 	body, _ := json.Marshal(payload)
 

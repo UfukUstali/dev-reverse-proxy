@@ -24,11 +24,12 @@ Your app will be available at `http://myapp.localhost`.
 - `-s, -server` - Server URL (default: `http://localhost:8080`)
 - `-i, -id` - Client identifier (subdomain)
 - `-p, -port` - Port number (auto-selected if not set)
+- `-w, -wildcard` - Also route `*.<id>.localhost` to this port (e.g. `api.myapp.localhost`)
 
 Or via environment variables:
 
 ```bash
-SERVER=http://localhost:8080 ID=myapp devrp -- npm run dev
+SERVER=http://localhost:8080 ID=myapp WILDCARD=true devrp -- npm run dev
 ```
 
 The client sets `PORT`, `DEVRP_ID`, and `DEVRP_BASE_URL` environment variables for your process.

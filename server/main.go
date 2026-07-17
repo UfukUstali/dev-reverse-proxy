@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"sync"
 	"syscall"
 	"time"
@@ -18,6 +19,7 @@ type Client struct {
 	ID            string `json:"id"`
 	Port          int    `json:"port"`
 	Subdomain     string
+	Wildcard      bool
 	LastHeartbeat time.Time
 }
 
@@ -54,8 +56,9 @@ type ServerManager struct {
 }
 
 type RegisterRequest struct {
-	ID   string `json:"id"`
-	Port int    `json:"port"`
+	ID       string `json:"id"`
+	Port     int    `json:"port"`
+	Wildcard bool   `json:"wildcard"`
 }
 
 type RegisterResponse struct {
@@ -127,6 +130,7 @@ func (sm *ServerManager) handleRegister(w http.ResponseWriter, r *http.Request) 
 		ID:            internalID,
 		Port:          req.Port,
 		Subdomain:     req.ID,
+		Wildcard:      req.Wildcard,
 		LastHeartbeat: time.Now(),
 	}
 	sm.clients[internalID] = client
@@ -267,9 +271,15 @@ func (sm *ServerManager) generateConfig() {
 		routerName := "sub-" + subdomain
 		serviceName := "local-" + subdomain
 
+		rule := "Host(`" + client.Subdomain + ".localhost`)"
+		if client.Wildcard {
+			// Also match any subdomain of <id>.localhost, e.g. api.foo.localhost.
+			rule += " || HostRegexp(`^.+\\." + regexp.QuoteMeta(client.Subdomain) + "\\.localhost$`)"
+		}
+
 		config.HTTP.Routers[routerName] = Router{
 			EntryPoints: []string{"web"},
-			Rule:        "Host(`" + client.Subdomain + ".localhost`)",
+			Rule:        rule,
 			Service:     serviceName,
 		}
 
