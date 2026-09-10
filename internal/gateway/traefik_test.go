@@ -133,7 +133,7 @@ func TestTraefikPublicTraffic(t *testing.T) {
 		}
 	}))
 	defer dns.Close()
-	g, err := gateway.New(ctx, gateway.Config{DNS: &gateway.DNS{Client: hcloud.NewClient(hcloud.WithToken("fixture"), hcloud.WithEndpoint(dns.URL)), Zone: "example.com"}, ConfigDir: dir, Domain: "devrp.example.com", PublicIP: "127.0.0.1", EntryPoint: "websecure", Resolver: "dns", Identify: func(context.Context, string, string) (tailnet.Identity, error) {
+	g, err := gateway.New(ctx, gateway.Config{DNS: &gateway.DNS{Client: hcloud.NewClient(hcloud.WithToken("fixture"), hcloud.WithEndpoint(dns.URL)), Zone: "example.com"}, Lease: 2 * time.Second, ConfigDir: dir, Domain: "devrp.example.com", PublicIP: "127.0.0.1", EntryPoint: "websecure", Resolver: "dns", Identify: func(context.Context, string, string) (tailnet.Identity, error) {
 		return tailnet.Identity{ID: "node", IP: "127.0.0.1"}, nil
 	}})
 	if err != nil {
@@ -291,5 +291,20 @@ func TestTraefikPublicTraffic(t *testing.T) {
 		t.Fatal("child wildcard TLS:", err)
 	}
 	childConn.Close()
+
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		resp, err = request("/", "tenant.myapp.devrp.example.com")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 404 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expired wildcard route survived")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 }

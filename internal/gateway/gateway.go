@@ -265,21 +265,20 @@ func (g *Gateway) expire(ctx context.Context) {
 			return
 		case <-ticker.C:
 			g.mu.Lock()
-			expired := false
-			for _, p := range g.publications {
-				if !time.Now().Before(p.Expires) {
+			expired := []string{}
+			cutoff := time.Now()
+			for id, p := range g.publications {
+				if !cutoff.Before(p.Expires) {
 					g.retired[sessionKey(p.Owner, p.session)] = true
-					expired = true
+					expired = append(expired, id)
 				}
 			}
-			if expired {
+			if len(expired) > 0 {
 				if err := g.writeConfig(); err != nil {
 					log.Printf("expire routes: %v", err)
 				} else {
-					for id, p := range g.publications {
-						if !time.Now().Before(p.Expires) {
-							delete(g.publications, id)
-						}
+					for _, id := range expired {
+						delete(g.publications, id)
 					}
 				}
 			}

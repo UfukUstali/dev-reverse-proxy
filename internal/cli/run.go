@@ -56,14 +56,22 @@ func Run(ctx context.Context, cfg Config, args []string) error {
 	register := func() (publication.Response, error) {
 		return api.call(ctx, "/register", publication.RegisterRequest{ID: cfg.ID, Port: forwarder.Port, Wildcard: cfg.Wildcard, Session: session})
 	}
-	cleanup := func() {
+
+	cleanup := func() error {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if _, err := api.call(cleanupCtx, publicationPath("unregister", cfg.ID, session), nil); err != nil {
+		_, err := api.call(cleanupCtx, publicationPath("unregister", cfg.ID, session), nil)
+		var failure *apiError
+		if errors.As(err, &failure) && (failure.code == 404 || failure.code == 403) {
+			return nil
+		}
+		return err
+	}
+	defer func() {
+		if err := cleanup(); err != nil {
 			fmt.Fprintln(os.Stderr, "Publication removal pending lease expiry:", err)
 		}
-	}
-	defer cleanup()
+	}()
 	assigned, err := register()
 	if err != nil {
 		return err
@@ -93,6 +101,7 @@ func Run(ctx context.Context, cfg Config, args []string) error {
 	heartbeat := time.NewTicker(5 * time.Second)
 	defer heartbeat.Stop()
 	active := true
+	needsRemoval := false
 	readinessRunning := true
 	var sharingError error
 	for {
@@ -115,7 +124,7 @@ func Run(ctx context.Context, cfg Config, args []string) error {
 			fmt.Fprintln(os.Stderr, "Tailscale forwarder stopped; retrying sharing.")
 			stopReady()
 			readinessRunning = false
-			cleanup()
+			needsRemoval = cleanup() != nil
 			forwarder = nil
 		case <-heartbeat.C:
 			if !active {
@@ -137,6 +146,13 @@ func Run(ctx context.Context, cfg Config, args []string) error {
 			stopReady()
 			readinessRunning = false
 			if forwarder == nil {
+				if needsRemoval {
+					if err = cleanup(); err != nil {
+						fmt.Fprintln(os.Stderr, "Sharing pending removal of previous session:", err)
+						continue
+					}
+					needsRemoval = false
+				}
 				forwarder, err = tailnet.StartForwarder(ctx, cfg.Port)
 				if err != nil {
 					fmt.Fprintln(os.Stderr, "Sharing pending:", err)
@@ -144,11 +160,12 @@ func Run(ctx context.Context, cfg Config, args []string) error {
 				}
 				session = sessionID()
 			}
-			assigned, err = register()
+			nextAssignment, registerErr := register()
+			err = registerErr
 			var failure *apiError
 			if errors.As(err, &failure) && failure.code == 410 {
 				session = sessionID()
-				assigned, err = register()
+				nextAssignment, err = register()
 			}
 			if err != nil {
 				if errors.As(err, &failure) && (failure.code == 409 || failure.code == 403 || failure.code == 400 || failure.code == 422) {
@@ -166,10 +183,11 @@ func Run(ctx context.Context, cfg Config, args []string) error {
 				}
 				continue
 			}
-			if err = validateAssignment(cfg.ID, assigned); err != nil {
+			if err = validateAssignment(cfg.ID, nextAssignment); err != nil {
 				fmt.Fprintln(os.Stderr, "Sharing pending:", err)
 				continue
 			}
+			assigned = nextAssignment
 			fmt.Fprintln(os.Stdout, "Sharing reconnected:", assigned.URL)
 			stopReady = startReadiness(ctx, cfg, assigned)
 			readinessRunning = true

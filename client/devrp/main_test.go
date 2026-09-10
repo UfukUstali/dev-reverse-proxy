@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -18,7 +19,7 @@ import (
 
 func TestMissingGatewayFailsBeforeChildLaunch(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "devrp")
-	build := exec.Command("go", "build", "-o", bin, ".")
+	build := exec.Command("go", "build", "-race", "-o", bin, ".")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
@@ -37,7 +38,7 @@ func TestMissingGatewayFailsBeforeChildLaunch(t *testing.T) {
 func TestLaunchPassesPublicEnvironmentAndCleansOwnedForwarder(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "devrp")
-	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+	if out, err := exec.Command("go", "build", "-race", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
 	// A controllable executable replaces only the external tailscale command.
@@ -126,7 +127,7 @@ func prepareCLI(t *testing.T) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "devrp")
-	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+	if out, err := exec.Command("go", "build", "-race", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("%v %s", err, out)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "tailscale"), []byte(serveFixture), 0755); err != nil {
@@ -338,5 +339,89 @@ func TestMultiplePublicationsPreserveOtherServeConfiguration(t *testing.T) {
 		if config.TCP["24000"] == nil || len(config.Foreground) != 1-i {
 			t.Fatalf("cleanup affected another session: %s", data)
 		}
+	}
+}
+
+func TestGatewayRejectionsFailBeforeChildLaunch(t *testing.T) {
+	dir, bin := prepareCLI(t)
+	for _, status := range []int{400, 403, 409, 422, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/unregister" {
+					fmt.Fprint(w, `{"status":"ok"}`)
+					return
+				}
+				w.WriteHeader(status)
+				fmt.Fprint(w, `{"message":"registration rejected"}`)
+			}))
+			defer api.Close()
+			marker := filepath.Join(t.TempDir(), "child")
+			cmd := exec.Command(bin, "-s", api.URL, "--", "sh", "-c", `touch "$1"`, "sh", marker)
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "SERVE_STATE="+filepath.Join(dir, "state"))
+			out, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(out), "registration rejected") {
+				t.Fatalf("%v %s", err, out)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatal("rejected publication launched child")
+			}
+			if _, err := os.Stat(filepath.Join(dir, "state")); !os.IsNotExist(err) {
+				t.Fatal("rejected publication left Serve running")
+			}
+		})
+	}
+}
+
+func TestServeRecoveryRetriesFailedRemovalBeforeReplacingSession(t *testing.T) {
+	dir, bin := prepareCLI(t)
+	var offline atomic.Bool
+	var registrations, failedRemovals atomic.Int32
+	var mu sync.Mutex
+	activeSession := ""
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Path == "/unregister" {
+			if offline.Load() {
+				failedRemovals.Add(1)
+				w.WriteHeader(503)
+				fmt.Fprint(w, `{"message":"temporary outage"}`)
+				return
+			}
+			activeSession = ""
+			fmt.Fprint(w, `{"status":"ok"}`)
+			return
+		}
+		if r.URL.Path == "/register" {
+			var req map[string]any
+			json.NewDecoder(r.Body).Decode(&req)
+			if activeSession != "" && activeSession != req["session"] {
+				w.WriteHeader(409)
+				fmt.Fprint(w, `{"message":"name in use"}`)
+				return
+			}
+			activeSession = req["session"].(string)
+			registrations.Add(1)
+			fmt.Fprint(w, `{"status":"registered","url":"https://myapp.devrp.example.com","domain":"devrp.example.com","public_ip":"203.0.113.10"}`)
+			return
+		}
+		fmt.Fprint(w, `{"status":"ok"}`)
+	}))
+	defer api.Close()
+	cmd := exec.Command(bin, "-s", api.URL, "-p", "3035")
+	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "SERVE_STATE="+filepath.Join(dir, "state"), "SERVE_CRASH="+filepath.Join(dir, "crash"))
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	waitFor(t, func() bool { return registrations.Load() == 1 }, "initial publication")
+	offline.Store(true)
+	os.WriteFile(filepath.Join(dir, "crash"), nil, 0600)
+	waitFor(t, func() bool { return failedRemovals.Load() >= 2 }, "removal retry")
+	offline.Store(false)
+	waitFor(t, func() bool { return registrations.Load() == 2 }, "forwarder replacement without self-conflict")
+	_ = cmd.Process.Signal(os.Interrupt)
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
 	}
 }

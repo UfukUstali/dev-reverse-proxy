@@ -3,6 +3,7 @@ package gateway_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -145,5 +146,46 @@ func TestDNSConflictsAndOutagesDoNotDisturbOrdinaryPublication(t *testing.T) {
 				t.Fatal("DNS failure disturbed ordinary route")
 			}
 		})
+	}
+}
+
+func TestRemovalRetiresRegistrationWhileDNSIsPending(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	dns := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/rrsets") {
+			fmt.Fprint(w, `{"rrsets":[{"name":"myapp.devrp","type":"A","records":[{"value":"203.0.113.10"}]},{"name":"*.myapp.devrp","type":"A","records":[{"value":"203.0.113.10"}]}],"meta":{"pagination":{"page":1,"last_page":1}}}`)
+			return
+		}
+		close(entered)
+		<-release
+		fmt.Fprint(w, `{"zone":{"id":1,"name":"example.com","mode":"primary"}}`)
+	}))
+	defer dns.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	g, err := gateway.New(ctx, gateway.Config{ConfigDir: t.TempDir(), Domain: "devrp.example.com", PublicIP: "203.0.113.10", EntryPoint: "websecure", Resolver: "dns", Identify: func(context.Context, string, string) (tailnet.Identity, error) {
+		return tailnet.Identity{ID: "node", IP: "100.64.0.2"}, nil
+	}, DNS: &gateway.DNS{Client: hcloud.NewClient(hcloud.WithToken("fixture"), hcloud.WithEndpoint(dns.URL)), Zone: "example.com"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := strings.Repeat("a", 64)
+	result := make(chan int, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, httptest.NewRequest("POST", "/register", strings.NewReader(`{"id":"myapp","port":20001,"wildcard":true,"session":"`+session+`"}`)))
+		result <- w.Code
+	}()
+	<-entered
+	w := httptest.NewRecorder()
+	g.ServeHTTP(w, httptest.NewRequest("POST", "/unregister?id=myapp&session="+session, nil))
+	close(release)
+	if got := <-result; got != 410 {
+		t.Fatalf("cancelled registration revived route: %d", got)
+	}
+	w = httptest.NewRecorder()
+	g.ServeHTTP(w, httptest.NewRequest("GET", "/clients", nil))
+	if strings.Contains(w.Body.String(), "myapp") {
+		t.Fatalf("cancelled publication is active: %s", w.Body.String())
 	}
 }
