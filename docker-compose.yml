@@ -1,56 +1,18 @@
----
-
-volumes:
-  traefik-config:
-
-networks:
-  proxy-network:
-    driver: bridge
-
+# Run beside the operator's existing Traefik and host tailscaled.
 services:
   proxy-server:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: dev-proxy-server
-    ports:
-      - "127.0.0.1:8080:8080"
+    build: .
+    network_mode: host
     environment:
-      - PORT=8080
-      - CONFIG_DIR=/config
+      LISTEN_ADDR: "${GATEWAY_TAILSCALE_IP:?set the gateway Tailscale IP}:8080"
+      CONFIG_DIR: /config
+      PUBLIC_DOMAIN: "${PUBLIC_DOMAIN:-devrp.liuf.uk}"
+      GATEWAY_PUBLIC_IP: "${GATEWAY_PUBLIC_IP:?set the public VPS IP}"
+      TRAEFIK_ENTRYPOINT: "${TRAEFIK_ENTRYPOINT:-websecure}"
+      TRAEFIK_RESOLVER: "${TRAEFIK_RESOLVER:-hetzner}"
+      HETZNER_ZONE: "${HETZNER_ZONE:-}"
+      HETZNER_TOKEN: "${HETZNER_TOKEN:-}"
     volumes:
-      - traefik-config:/config
-    networks:
-      - proxy-network
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: unless-stopped
-
-  traefik:
-    image: traefik:latest
-    container_name: dev-traefik
-    command:
-      - "--api.insecure=true"
-
-        # Providers
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--providers.docker.network=proxy-network"
-      - "--providers.file.directory=/config"
-      - "--providers.file.watch=true"
-
-      - "--entrypoints.web.address=:80"
-      - "--log.level=INFO"
-    ports:
-      - "127.0.0.1:80:80"
-      - "127.0.0.1:8081:8080"
-    volumes:
-      - traefik-config:/config
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - proxy-network
-    depends_on:
-      - proxy-server
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "${TRAEFIK_CONFIG_DIR:?set the existing watched directory}:/config"
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
     restart: unless-stopped

@@ -1,387 +1,72 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
-	"regexp"
-	"sync"
 	"syscall"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"github.com/UfukUstali/dev-reverse-proxy/internal/gateway"
+	"github.com/UfukUstali/dev-reverse-proxy/internal/tailnet"
+	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 )
 
-type Client struct {
-	ID            string `json:"id"`
-	Port          int    `json:"port"`
-	Subdomain     string
-	Wildcard      bool
-	LastHeartbeat time.Time
-}
-
-type TraefikConfig struct {
-	HTTP struct {
-		Routers  map[string]Router  `yaml:"routers,omitempty"`
-		Services map[string]Service `yaml:"services,omitempty"`
-	} `yaml:"http,omitempty"`
-}
-
-type Router struct {
-	EntryPoints []string `yaml:"entryPoints"`
-	Rule        string   `yaml:"rule"`
-	Service     string   `yaml:"service"`
-}
-
-type Service struct {
-	LoadBalancer LoadBalancer `yaml:"loadBalancer"`
-}
-
-type LoadBalancer struct {
-	Servers []Server `yaml:"servers"`
-}
-
-type Server struct {
-	URL string `yaml:"url"`
-}
-
-type ServerManager struct {
-	clients          map[string]*Client
-	mu               sync.RWMutex
-	configDir        string
-	heartbeatTimeout time.Duration
-}
-
-type RegisterRequest struct {
-	ID       string `json:"id"`
-	Port     int    `json:"port"`
-	Wildcard bool   `json:"wildcard"`
-}
-
-type RegisterResponse struct {
-	Status  string `json:"status"`
-	URL     string `json:"url"`
-	Message string `json:"message,omitempty"`
-}
-
-func NewServerManager(configDir string, heartbeatTimeout time.Duration) *ServerManager {
-	return &ServerManager{
-		clients:          make(map[string]*Client),
-		configDir:        configDir,
-		heartbeatTimeout: heartbeatTimeout,
-	}
-}
-
-func (sm *ServerManager) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(RegisterResponse{
-			Status:  "error",
-			Message: "invalid json",
-		})
-		return
-	}
-
-	if !validateSubdomain(req.ID) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(RegisterResponse{
-			Status:  "error",
-			Message: "invalid subdomain format",
-		})
-		return
-	}
-
-	if req.Port < 1 || req.Port > 65535 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(RegisterResponse{
-			Status:  "error",
-			Message: "invalid port",
-		})
-		return
-	}
-
-	internalID := toInternalID(req.ID)
-
-	sm.mu.Lock()
-	if _, exists := sm.clients[internalID]; exists {
-		sm.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(RegisterResponse{
-			Status:  "error",
-			Message: "subdomain already in use",
-		})
-		return
-	}
-
-	client := &Client{
-		ID:            internalID,
-		Port:          req.Port,
-		Subdomain:     req.ID,
-		Wildcard:      req.Wildcard,
-		LastHeartbeat: time.Now(),
-	}
-	sm.clients[internalID] = client
-	sm.mu.Unlock()
-
-	log.Printf("Client registered: %s -> port %d", client.Subdomain, client.Port)
-	sm.generateConfig()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(RegisterResponse{
-		Status: "registered",
-		URL:    client.Subdomain + ".localhost",
-	})
-}
-
-func (sm *ServerManager) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"status":  "error",
-			"message": "missing id parameter",
-		})
-		return
-	}
-
-	internalID := toInternalID(id)
-
-	sm.mu.Lock()
-	client, exists := sm.clients[internalID]
-	if !exists {
-		sm.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{
-			"status":  "error",
-			"message": "client not found",
-		})
-		return
-	}
-
-	client.LastHeartbeat = time.Now()
-	sm.mu.Unlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"status": "ok",
-	})
-}
-
-func (sm *ServerManager) handleUnregister(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"status":  "error",
-			"message": "missing id parameter",
-		})
-		return
-	}
-
-	internalID := toInternalID(id)
-
-	sm.mu.Lock()
-	_, exists := sm.clients[internalID]
-	if !exists {
-		sm.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{
-			"status":  "error",
-			"message": "client not found",
-		})
-		return
-	}
-
-	delete(sm.clients, internalID)
-	sm.mu.Unlock()
-
-	log.Printf("Client unregistered: %s", id)
-	sm.generateConfig()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"status": "unregistered",
-	})
-}
-
-func (sm *ServerManager) checkHeartbeats() {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		sm.mu.Lock()
-		now := time.Now()
-		expired := []string{}
-
-		for id, client := range sm.clients {
-			if now.Sub(client.LastHeartbeat) > sm.heartbeatTimeout {
-				expired = append(expired, id)
-			}
-		}
-
-		for _, id := range expired {
-			delete(sm.clients, id)
-			log.Printf("Client expired (no heartbeat): %s", id)
-		}
-
-		sm.mu.Unlock()
-
-		if len(expired) > 0 {
-			sm.generateConfig()
-		}
-	}
-}
-
-func (sm *ServerManager) generateConfig() {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	config := TraefikConfig{}
-	config.HTTP.Routers = make(map[string]Router)
-	config.HTTP.Services = make(map[string]Service)
-
-	for subdomain, client := range sm.clients {
-		routerName := "sub-" + subdomain
-		serviceName := "local-" + subdomain
-
-		rule := "Host(`" + client.Subdomain + ".localhost`)"
-		if client.Wildcard {
-			// Also match any subdomain of <id>.localhost, e.g. api.foo.localhost.
-			rule += " || HostRegexp(`^.+\\." + regexp.QuoteMeta(client.Subdomain) + "\\.localhost$`)"
-		}
-
-		config.HTTP.Routers[routerName] = Router{
-			EntryPoints: []string{"web"},
-			Rule:        rule,
-			Service:     serviceName,
-		}
-
-		config.HTTP.Services[serviceName] = Service{
-			LoadBalancer: LoadBalancer{
-				Servers: []Server{
-					{URL: fmt.Sprintf("http://host.docker.internal:%d", client.Port)},
-				},
-			},
-		}
-	}
-
-	data, err := yaml.Marshal(config)
-	if err != nil {
-		log.Printf("Failed to marshal config: %v", err)
-		return
-	}
-
-	configPath := sm.configDir + "/dynamic.yml"
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
-		log.Printf("Failed to write config: %v", err)
-		return
-	}
-
-	log.Printf("Generated Traefik config with %d routes", len(sm.clients))
-}
-
-func (sm *ServerManager) getStatus(w http.ResponseWriter, r *http.Request) {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	response := map[string]any{
-		"status":  "ok",
-		"clients": len(sm.clients),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
-}
-
-func (sm *ServerManager) getClients(w http.ResponseWriter, r *http.Request) {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	clients := make([]map[string]any, 0, len(sm.clients))
-	for _, client := range sm.clients {
-		clients = append(clients, map[string]any{
-			"id":             client.ID,
-			"domain":         client.Subdomain + ".localhost",
-			"port":           client.Port,
-			"last_heartbeat": client.LastHeartbeat.Format(time.RFC3339),
-		})
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
-		"clients": clients,
-	})
-}
-
 func main() {
-	configDir := os.Getenv("CONFIG_DIR")
-	if configDir == "" {
-		configDir = "/config"
+	if err := run(); err != nil {
+		log.Fatal(err)
 	}
-
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		log.Fatalf("Failed to create config directory: %v", err)
+}
+func run() error {
+	addr, err := netip.ParseAddrPort(os.Getenv("LISTEN_ADDR"))
+	if err != nil || !tailnet.IsAddress(addr.Addr()) || addr.Port() == 0 {
+		return fmt.Errorf("LISTEN_ADDR must be the gateway Tailscale IP and port, for example 100.64.0.1:8080")
 	}
-
-	heartbeatTimeout := 30 * time.Second
-	if timeout := os.Getenv("HEARTBEAT_TIMEOUT"); timeout != "" {
-		if d, err := time.ParseDuration(timeout); err == nil {
-			heartbeatTimeout = d
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	cfg := gateway.Config{ConfigDir: env("CONFIG_DIR", "/config"), Domain: env("PUBLIC_DOMAIN", "devrp.liuf.uk"), PublicIP: os.Getenv("GATEWAY_PUBLIC_IP"), EntryPoint: env("TRAEFIK_ENTRYPOINT", "websecure"), Resolver: env("TRAEFIK_RESOLVER", "hetzner"), Identify: tailnet.LocalIdentity(env("TAILSCALE_SOCKET", "/var/run/tailscale/tailscaled.sock"))}
+	if token := os.Getenv("HETZNER_TOKEN"); token != "" {
+		cfg.DNS = &gateway.DNS{Client: hcloud.NewClient(hcloud.WithToken(token)), Zone: os.Getenv("HETZNER_ZONE")}
+	}
+	// Claim the listener before clearing stale routes, so a second gateway cannot
+	// erase the running instance's configuration when its bind fails.
+	ln, err := net.Listen("tcp", addr.String())
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+	manager, err := gateway.New(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	server := &http.Server{Handler: manager, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ln) }()
+	log.Printf("Gateway listening on %s for %s", addr, cfg.Domain)
+	select {
+	case err := <-done:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return err
 		}
+	case <-ctx.Done():
 	}
-
-	manager := NewServerManager(configDir, heartbeatTimeout)
-
-	http.HandleFunc("/register", manager.handleRegister)
-	http.HandleFunc("/heartbeat", manager.handleHeartbeat)
-	http.HandleFunc("/unregister", manager.handleUnregister)
-	http.HandleFunc("/status", manager.getStatus)
-	http.HandleFunc("/clients", manager.getClients)
-
-	go manager.checkHeartbeats()
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	shutdownCtx, stop := context.WithTimeout(context.Background(), 25*time.Second)
+	defer stop()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		_ = server.Close()
+		return err
 	}
-
-	go func() {
-		log.Printf("Server starting on :%s (heartbeat timeout: %v)", port, heartbeatTimeout)
-		if err := http.ListenAndServe(":"+port, nil); err != nil {
-			log.Fatalf("Server failed: %v", err)
-		}
-	}()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
-
-	log.Println("Shutting down...")
+	return manager.Close()
+}
+func env(key, fallback string) string {
+	if s := os.Getenv(key); s != "" {
+		return s
+	}
+	return fallback
 }
