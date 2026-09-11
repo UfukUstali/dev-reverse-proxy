@@ -35,6 +35,8 @@ Ctrl-C removes sharing and stops a launched application process group. It leaves
 
 ## Gateway
 
+For guided setup, copy or clone this checkout onto the VPS and run `./scripts/setup-gateway.sh` there. It requires existing Traefik v3, Tailscale, and Docker Compose. The wizard saves settings in a private `.env`, guides DNS and tailnet changes, and asks before starting the gateway.
+
 Use the existing public VPS, Traefik v3 deployment, and DNS challenge resolver. Follow [gateway setup](docs/gateway-setup.md) for the tailnet grants, forwarding trust chain, shared wildcard certificate, and live acceptance checks.
 
 Build the registration service with `go build -o devrp-gateway ./server`. Configure these environment variables on the gateway:

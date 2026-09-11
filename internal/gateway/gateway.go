@@ -56,7 +56,7 @@ func New(ctx context.Context, cfg Config) (*Gateway, error) {
 	if len(cfg.Domain) > 180 || !strings.Contains(cfg.Domain, ".") {
 		return nil, errors.New("invalid public domain")
 	}
-	for _, part := range strings.Split(cfg.Domain, ".") {
+	for part := range strings.SplitSeq(cfg.Domain, ".") {
 		if !publication.ValidName(part) {
 			return nil, errors.New("invalid public domain")
 		}
@@ -253,10 +253,7 @@ func (g *Gateway) update(w http.ResponseWriter, r *http.Request, owner tailnet.I
 }
 
 func (g *Gateway) expire(ctx context.Context) {
-	interval := g.cfg.Lease / 10
-	if interval > time.Second {
-		interval = time.Second
-	}
+	interval := min(g.cfg.Lease/10, time.Second)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {

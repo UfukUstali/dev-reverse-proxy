@@ -30,7 +30,14 @@ func run() error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	cfg := gateway.Config{ConfigDir: env("CONFIG_DIR", "/config"), Domain: env("PUBLIC_DOMAIN", "devrp.liuf.uk"), PublicIP: os.Getenv("GATEWAY_PUBLIC_IP"), EntryPoint: env("TRAEFIK_ENTRYPOINT", "websecure"), Resolver: env("TRAEFIK_RESOLVER", "hetzner"), Identify: tailnet.LocalIdentity(env("TAILSCALE_SOCKET", "/var/run/tailscale/tailscaled.sock"))}
+	cfg := gateway.Config{
+		ConfigDir:  env("CONFIG_DIR", "/config"),
+		Domain:     env("PUBLIC_DOMAIN", "devrp.liuf.uk"),
+		PublicIP:   os.Getenv("GATEWAY_PUBLIC_IP"),
+		EntryPoint: env("TRAEFIK_ENTRYPOINT", "websecure"),
+		Resolver:   env("TRAEFIK_RESOLVER", "hetzner"),
+		Identify:   tailnet.LocalIdentity(env("TAILSCALE_SOCKET", "/var/run/tailscale/tailscaled.sock")),
+	}
 	if token := os.Getenv("HETZNER_TOKEN"); token != "" {
 		cfg.DNS = &gateway.DNS{Client: hcloud.NewClient(hcloud.WithToken(token)), Zone: os.Getenv("HETZNER_ZONE")}
 	}
@@ -45,7 +52,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: manager, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
+	server := &http.Server{Handler: manager,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(ln) }()
 	log.Printf("Gateway listening on %s for %s", addr, cfg.Domain)

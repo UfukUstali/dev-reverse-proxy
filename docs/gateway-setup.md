@@ -2,6 +2,12 @@
 
 Run the registration service on the existing Linux VPS beside Traefik. The gateway and development machines must already belong to the same tailnet. This setup replaces the old local Traefik deployment.
 
+Run `./scripts/setup-gateway.sh` from a checkout on the VPS for an interactive walkthrough. Use an account that can run Docker and inspect Tailscale. Open the printed dashboard URLs on your own computer if the VPS has no browser. The wizard backs up an existing `.env`, saves settings with mode `0600`, and asks before running Compose. Reruns offer saved values. No GitHub secrets are required.
+
+The wizard guides manual edits to your existing DNS, tailnet policy, and Traefik configuration. It does not replace those configurations. Its closing summary lists live checks that you have not confirmed.
+
+External setup references: [Tailscale grants syntax](https://tailscale.com/docs/reference/syntax/grants), [Traefik TLS stores](https://doc.traefik.io/traefik/https/tls/), and [Hetzner API tokens](https://docs.hetzner.com/cloud/api/getting-started/generating-api-token/).
+
 ## Network policy
 
 Bind the control API directly to the gateway's Tailscale IP. Do not put a public reverse proxy in front of it. The gateway identifies the TCP peer through the local tailscaled Unix socket and requires the `devrp.liuf.uk/publish` capability in the returned peer capability map. HTTP identity headers are never trusted.
