@@ -1,4 +1,4 @@
-package gateway_test
+package gateway
 
 import (
 	"bufio"
@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/UfukUstali/dev-reverse-proxy/internal/gateway"
 	"github.com/UfukUstali/dev-reverse-proxy/internal/tailnet"
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 )
@@ -53,9 +52,17 @@ func TestTraefikPublicTraffic(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "fixture.yml"), []byte(fmt.Sprintf("tls:\n  certificates:\n    - certFile: %s\n      keyFile: %s\n", filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"))), 0600)
 	roots := x509.NewCertPool()
 	roots.AppendCertsFromPEM(certPEM)
+	const alias = "acme-myapp.devrp.example.com"
 	release := make(chan struct{})
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/routing":
+			if r.Method != "GET" || r.Host != "authcenter.devrp.example.com" || r.Header.Get("Authorization") != "Bearer routing-fixture" {
+				http.Error(w, "unauthorized", 401)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"routes":[{"domain":%q,"appDomain":"myapp.devrp.example.com"}]}`, alias)
 		case "/stream":
 			fmt.Fprintln(w, "first")
 			w.(http.Flusher).Flush()
@@ -78,7 +85,7 @@ func TestTraefikPublicTraffic(t *testing.T) {
 			}
 			_, _ = conn.Write([]byte{0x81, 2, frame[6] ^ frame[2], frame[7] ^ frame[3]})
 		default:
-			_ = json.NewEncoder(w).Encode(map[string]string{"host": r.Host, "scheme": r.Header.Get("X-Forwarded-Proto"), "visitor": r.Header.Get("X-Forwarded-For"), "forwarded": r.Header.Get("Forwarded")})
+			_ = json.NewEncoder(w).Encode(map[string]string{"host": r.Host, "scheme": r.Header.Get("X-Forwarded-Proto"), "forwardedHost": r.Header.Get("X-Forwarded-Host"), "visitor": r.Header.Get("X-Forwarded-For"), "forwarded": r.Header.Get("Forwarded")})
 		}
 	}))
 	defer backend.Close()
@@ -133,12 +140,23 @@ func TestTraefikPublicTraffic(t *testing.T) {
 		}
 	}))
 	defer dns.Close()
-	g, err := gateway.New(ctx, gateway.Config{DNS: &gateway.DNS{Client: hcloud.NewClient(hcloud.WithToken("fixture"), hcloud.WithEndpoint(dns.URL)), Zone: "example.com"}, Lease: 2 * time.Second, ConfigDir: dir, Domain: "devrp.example.com", PublicIP: "127.0.0.1", EntryPoint: "websecure", Resolver: "dns", Identify: func(context.Context, string, string) (tailnet.Identity, error) {
+	g, err := New(ctx, Config{RoutingInterval: 50 * time.Millisecond, DNS: &DNS{Client: hcloud.NewClient(hcloud.WithToken("fixture"), hcloud.WithEndpoint(dns.URL)), Zone: "example.com"}, Lease: 2 * time.Second, ConfigDir: dir, Domain: "devrp.example.com", PublicIP: "127.0.0.1", EntryPoint: "websecure", Resolver: "dns", Identify: func(context.Context, string, string) (tailnet.Identity, error) {
 		return tailnet.Identity{ID: "node", IP: "127.0.0.1"}, nil
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Drive polling through Traefik's Authcenter publication, using local dial
+	// addresses and fixture roots while preserving the derived public HTTPS URL.
+	g.cfg.RoutingSubdomain, g.cfg.RoutingSecret = "authcenter", "routing-fixture"
+	sourceTLS := &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	sourceTransport := &http.Transport{TLSClientConfig: sourceTLS, DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}}
+	defer sourceTransport.CloseIdleConnections()
+	sourceClient := routingClient()
+	sourceClient.Transport = sourceTransport
+	go g.pollRouting(ctx, sourceClient)
 	session := strings.Repeat("e", 64)
 	w := httptest.NewRecorder()
 	g.ServeHTTP(w, httptest.NewRequest("POST", "/register", strings.NewReader(fmt.Sprintf(`{"id":"myapp","port":%d,"session":"%s"}`, listener.Addr().(*net.TCPAddr).Port, session))))
@@ -167,16 +185,23 @@ func TestTraefikPublicTraffic(t *testing.T) {
 			t.Log(string(data))
 		}
 	}()
+	w = httptest.NewRecorder()
+	g.ServeHTTP(w, httptest.NewRequest("POST", "/register", strings.NewReader(fmt.Sprintf(`{"id":"authcenter","port":%d,"session":"%s"}`, listener.Addr().(*net.TCPAddr).Port, strings.Repeat("d", 64)))))
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
 	tlsConfig := &tls.Config{RootCAs: roots, ServerName: "myapp.devrp.example.com", MinVersion: tls.VersionTLS12}
 	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsConfig}}
-	request := func(path, host string) (*http.Response, error) {
+	send := func(client *http.Client, path, host string) (*http.Response, error) {
 		r, _ := http.NewRequest("GET", "https://"+address+path, nil)
 		r.Host = host
 		r.Header.Set("X-Forwarded-For", "198.51.100.44")
 		r.Header.Set("X-Forwarded-Proto", "http")
+		r.Header.Set("X-Forwarded-Host", "forged.example")
 		r.Header.Set("Forwarded", "for=198.51.100.44;proto=http")
 		return client.Do(r)
 	}
+	request := func(path, host string) (*http.Response, error) { return send(client, path, host) }
 	deadline := time.Now().Add(8 * time.Second)
 	for {
 		resp, err := request("/", "myapp.devrp.example.com")
@@ -198,9 +223,37 @@ func TestTraefikPublicTraffic(t *testing.T) {
 	var headers map[string]string
 	_ = json.NewDecoder(resp.Body).Decode(&headers)
 	resp.Body.Close()
-	if headers["host"] != "myapp.devrp.example.com" || headers["scheme"] != "https" || headers["visitor"] != "127.0.0.1" || headers["forwarded"] != "" {
+	if headers["host"] != "myapp.devrp.example.com" || headers["forwardedHost"] != "myapp.devrp.example.com" || headers["scheme"] != "https" || headers["visitor"] != "127.0.0.1" || headers["forwarded"] != "" {
 		t.Fatalf("untrusted metadata: %v", headers)
 	}
+	aliasTLS := tlsConfig.Clone()
+	aliasTLS.ServerName = alias
+	aliasTransport := &http.Transport{TLSClientConfig: aliasTLS}
+	defer aliasTransport.CloseIdleConnections()
+	aliasClient := &http.Client{Timeout: 3 * time.Second, Transport: aliasTransport}
+	checkAlias := func(wantStatus int) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			resp, err := send(aliasClient, "/", alias)
+			if err == nil {
+				var got map[string]string
+				_ = json.NewDecoder(resp.Body).Decode(&got)
+				resp.Body.Close()
+				if resp.StatusCode == wantStatus {
+					if wantStatus == 200 && (got["host"] != alias || got["forwardedHost"] != alias || got["scheme"] != "https" || got["visitor"] != "127.0.0.1" || got["forwarded"] != "") {
+						t.Fatalf("alias lost trusted metadata: %v", got)
+					}
+					return
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("alias did not return %d: %v", wantStatus, err)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	checkAlias(200)
 	resp, err = request("/stream", "myapp.devrp.example.com")
 	if err != nil {
 		t.Fatal(err)
@@ -242,6 +295,7 @@ func TestTraefikPublicTraffic(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
+	checkAlias(404)
 	deadline = time.Now().Add(5 * time.Second)
 	for {
 		resp, err = request("/", "myapp.devrp.example.com")
@@ -262,6 +316,7 @@ func TestTraefikPublicTraffic(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
+	checkAlias(200)
 	deadline = time.Now().Add(5 * time.Second)
 	for {
 		resp, err = request("/", "tenant.myapp.devrp.example.com")
@@ -306,5 +361,6 @@ func TestTraefikPublicTraffic(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	checkAlias(404)
 
 }

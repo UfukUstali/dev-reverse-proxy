@@ -5,6 +5,7 @@ import (
 	"net"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -12,8 +13,9 @@ import (
 
 func (g *Gateway) writeConfig() error {
 	routers, services := map[string]any{}, map[string]any{}
+	now := time.Now()
 	for id, p := range g.publications {
-		if !time.Now().Before(p.Expires) {
+		if !now.Before(p.Expires) {
 			continue
 		}
 		hostname := id + "." + g.cfg.Domain
@@ -27,6 +29,18 @@ func (g *Gateway) writeConfig() error {
 		name := "devrp-" + id
 		routers[name] = map[string]any{"entryPoints": []string{g.cfg.EntryPoint}, "rule": rule, "service": name, "tls": tls, "middlewares": []string{"devrp-forwarding"}}
 		services[name] = map[string]any{"loadBalancer": map[string]any{"passHostHeader": true, "servers": []any{map[string]any{"url": "http://" + net.JoinHostPort(p.IP, strconv.Itoa(p.Port))}}, "responseForwarding": map[string]any{"flushInterval": "-1ms"}}}
+	}
+	for domain, id := range g.aliases {
+		p, ok := g.publications[id]
+		if !ok || !now.Before(p.Expires) {
+			continue
+		}
+		if other, ok := g.publications[strings.TrimSuffix(domain, "."+g.cfg.Domain)]; ok && now.Before(other.Expires) {
+			// Publication registrations always retain their own hostname, even if
+			// Authcenter previously imported that name as an alias.
+			continue
+		}
+		routers["devrp-alias-"+domain] = map[string]any{"entryPoints": []string{g.cfg.EntryPoint}, "rule": "Host(`" + domain + "`)", "service": "devrp-" + id, "tls": map[string]any{}, "middlewares": []string{"devrp-forwarding"}}
 	}
 	// Traefik sanitizes X-Forwarded-* at the entrypoint. Remove alternate metadata
 	// that applications might otherwise prefer over Traefik's trusted headers.

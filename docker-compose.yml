@@ -12,6 +12,9 @@ services:
       TRAEFIK_RESOLVER: "${TRAEFIK_RESOLVER:-hetzner}"
       HETZNER_ZONE: "${HETZNER_ZONE:-}"
       HETZNER_TOKEN: "${HETZNER_TOKEN:-}"
+      AUTHCENTER_ROUTING_SUBDOMAIN: "${AUTHCENTER_ROUTING_SUBDOMAIN:-}"
+      AUTHCENTER_ROUTING_SECRET: "${AUTHCENTER_ROUTING_SECRET:-}"
+      AUTHCENTER_ROUTING_INTERVAL: "${AUTHCENTER_ROUTING_INTERVAL:-30s}"
     volumes:
       - "${TRAEFIK_CONFIG_DIR:?set the existing watched directory}:/config"
       - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock

@@ -25,6 +25,8 @@ type Config struct {
 	ConfigDir, Domain, PublicIP, EntryPoint, Resolver string
 	Lease                                             time.Duration
 	Identify                                          tailnet.Identify
+	RoutingSubdomain, RoutingSecret                   string
+	RoutingInterval                                   time.Duration
 }
 
 type Publication struct {
@@ -44,9 +46,14 @@ type Gateway struct {
 	mu           sync.Mutex
 	publications map[string]Publication
 	retired      map[string]bool
+	aliases      map[string]string // Authcenter hostname -> exact publication ID, including dormant targets.
+	routingWake  chan struct{}
 }
 
 func New(ctx context.Context, cfg Config) (*Gateway, error) {
+	if err := configureRouting(&cfg); err != nil {
+		return nil, err
+	}
 	if cfg.Lease == 0 {
 		cfg.Lease = 30 * time.Second
 	}
@@ -67,11 +74,14 @@ func New(ctx context.Context, cfg Config) (*Gateway, error) {
 	if err := os.MkdirAll(cfg.ConfigDir, 0755); err != nil {
 		return nil, err
 	}
-	g := &Gateway{pending: map[string]bool{}, cfg: cfg, publications: map[string]Publication{}, retired: map[string]bool{}}
+	g := &Gateway{pending: map[string]bool{}, cfg: cfg, publications: map[string]Publication{}, retired: map[string]bool{}, routingWake: make(chan struct{}, 1)}
 	if err := g.writeConfig(); err != nil {
 		return nil, err
 	}
 	go g.expire(ctx)
+	if cfg.RoutingSubdomain != "" {
+		go g.pollRouting(ctx, routingClient())
+	}
 	return g, nil
 }
 
@@ -214,6 +224,12 @@ func (g *Gateway) register(ctx context.Context, w http.ResponseWriter, r *http.R
 		}
 		reply(w, 503, publication.Response{Message: "write Traefik configuration: " + err.Error()})
 		return
+	}
+	if p.ID == g.cfg.RoutingSubdomain {
+		select {
+		case g.routingWake <- struct{}{}:
+		default:
+		}
 	}
 	reply(w, 200, g.response(p))
 }

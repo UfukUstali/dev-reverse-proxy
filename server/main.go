@@ -31,12 +31,20 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	cfg := gateway.Config{
-		ConfigDir:  env("CONFIG_DIR", "/config"),
-		Domain:     env("PUBLIC_DOMAIN", "devrp.liuf.uk"),
-		PublicIP:   os.Getenv("GATEWAY_PUBLIC_IP"),
-		EntryPoint: env("TRAEFIK_ENTRYPOINT", "websecure"),
-		Resolver:   env("TRAEFIK_RESOLVER", "hetzner"),
-		Identify:   tailnet.LocalIdentity(env("TAILSCALE_SOCKET", "/var/run/tailscale/tailscaled.sock")),
+		ConfigDir:        env("CONFIG_DIR", "/config"),
+		Domain:           env("PUBLIC_DOMAIN", "devrp.liuf.uk"),
+		PublicIP:         os.Getenv("GATEWAY_PUBLIC_IP"),
+		EntryPoint:       env("TRAEFIK_ENTRYPOINT", "websecure"),
+		Resolver:         env("TRAEFIK_RESOLVER", "hetzner"),
+		Identify:         tailnet.LocalIdentity(env("TAILSCALE_SOCKET", "/var/run/tailscale/tailscaled.sock")),
+		RoutingSubdomain: os.Getenv("AUTHCENTER_ROUTING_SUBDOMAIN"),
+		RoutingSecret:    os.Getenv("AUTHCENTER_ROUTING_SECRET"),
+	}
+	if interval := os.Getenv("AUTHCENTER_ROUTING_INTERVAL"); interval != "" {
+		cfg.RoutingInterval, err = time.ParseDuration(interval)
+		if err != nil || cfg.RoutingInterval <= 0 {
+			return errors.New("AUTHCENTER_ROUTING_INTERVAL must be a positive Go duration, for example 30s")
+		}
 	}
 	if token := os.Getenv("HETZNER_TOKEN"); token != "" {
 		cfg.DNS = &gateway.DNS{Client: hcloud.NewClient(hcloud.WithToken(token)), Zone: os.Getenv("HETZNER_ZONE")}

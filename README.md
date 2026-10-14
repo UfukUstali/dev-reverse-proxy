@@ -52,12 +52,33 @@ Build the registration service with `go build -o devrp-gateway ./server`. Config
 | `TAILSCALE_SOCKET` | Existing tailscaled socket, default `/var/run/tailscale/tailscaled.sock` |
 | `HETZNER_TOKEN` | Cloud API token, required only for wildcard publications |
 | `HETZNER_ZONE` | Existing Cloud DNS zone name or ID, required only for wildcard publications |
+| `AUTHCENTER_ROUTING_SUBDOMAIN` | Optional Authcenter publication name, such as `authcenter`; configure together with the secret |
+| `AUTHCENTER_ROUTING_SECRET` | Bearer secret for routing polls |
+| `AUTHCENTER_ROUTING_INTERVAL` | Positive Go duration between polls, default `30s` |
 
 The Compose file runs only the gateway with host networking. Set `GATEWAY_TAILSCALE_IP`, `GATEWAY_PUBLIC_IP`, and `TRAEFIK_CONFIG_DIR` before `docker compose up -d --build`. It mounts the existing tailscaled socket and watched directory. It does not create another Traefik or Tailscale deployment.
 
 Ordinary publications use the centrally provisioned wildcard DNS record and certificate and never call Hetzner. Wildcard publications create or reuse the exact hostname and child-wildcard address records. Conflicts fail registration. Records remain after sharing ends; route removal ends access. Traefik alone acquires and renews certificates.
 
 The gateway owns `devrp.yml` in its watched directory. Use one gateway instance and a dedicated control port. Startup clears stale routes; orderly shutdown clears active routes. The gateway stores leases in memory, so a restart causes running CLIs to register again. The old local-only `dynamic.yml` file is not used; remove it during migration if it was created by the previous devrp deployment.
+
+## Authcenter aliases
+
+To import tenant anchor hostnames, set `AUTHCENTER_ROUTING_SUBDOMAIN=authcenter` and `AUTHCENTER_ROUTING_SECRET` on the gateway, or in the Compose `.env`. The subdomain must be a lowercase single DNS label, like a publication name; full URLs, domains, ports, and paths are rejected. The gateway builds `https://authcenter.<PUBLIC_DOMAIN>/routing`, using the existing public HTTPS gateway. Keep the secret out of version control. Polling stays silent while that exact publication is absent or expired, wakes when it registers, and repeats at the configured interval while its lease is active. Aliases alone do not enable polling. Each GET sends `Authorization: Bearer <secret>` and accepts HTTP 200 with `Content-Type: application/json` and this development contract:
+
+```json
+{"routes":[{"domain":"acme-templatefoobar.devrp.liuf.uk","appDomain":"templatefoobar.devrp.liuf.uk"}]}
+```
+
+`routes` is a complete replacement snapshot. `{"routes":[]}` clears imported aliases. Polls have a five-second timeout and a one-MiB response limit; redirects are rejected. Malformed JSON, unexpected or duplicate fields, invalid hostnames, duplicate alias ownership, conflicting publication hostnames, HTTP failures, and configuration write failures retain the last accepted snapshot. Taking Authcenter offline also retains that snapshot; responses from a publication that leaves during a poll are discarded. There is no persisted alias cache across gateway restarts.
+
+`appDomain` must exactly equal `<publication.ID>.<PUBLIC_DOMAIN>`. The gateway uses only that live publication's Tailscale identity address and forwarding port. It never resolves `appDomain` through DNS and never accepts addresses or ports from Authcenter. An alias without a live target remains dormant. Lease expiry and unregister remove its routing even while Authcenter is unavailable; registering the matching publication restores it without another successful poll. Publication changes rebuild aliases. If a publication later claims an imported single-label hostname, its ordinary route takes precedence; the alias can resume after that publication leaves.
+
+Alias hostnames must be exactly one lowercase DNS label beneath `PUBLIC_DOMAIN`, such as `acme-templatefoobar.devrp.liuf.uk`, without ports, wildcards, trailing dots, or URL syntax. They use the centrally provisioned wildcard DNS and certificate, just like ordinary publications. The operator must provision that shared wildcard before use; alias routers never request certificates.
+
+The gateway rejects all nested aliases, including `acme.templatefoobar.devrp.liuf.uk`, even when the target publication uses wildcard mode. It also rejects aliases equal to any application hostname named in the snapshot and external domains. Any rejected route rejects the entire snapshot and retains the previous accepted aliases. Supporting external domains would require an explicit DNS and certificate policy. Ordinary wildcard publications keep their existing routing behavior independently of Authcenter aliases.
+
+Aliases retain the visitor's Host and Traefik's HTTPS forwarding metadata. Apps use the anchor hostname to select the tenant and OIDC realm. App-owned domains remain reserved server identities; Authcenter must not emit them as application routes. Ordinary publication routing continues to work, and consuming apps are responsible for rejecting own-domain requests that lack anchor context.
 
 ## Control API
 
