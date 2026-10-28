@@ -425,3 +425,60 @@ func TestServeRecoveryRetriesFailedRemovalBeforeReplacingSession(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAliasChangesAreLogged(t *testing.T) {
+	dir, bin := prepareCLI(t)
+	var heartbeats atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/register":
+			fmt.Fprint(w, `{"status":"registered","url":"https://myapp.devrp.example.com","domain":"devrp.example.com","public_ip":"203.0.113.10","aliases":["https://acme.devrp.example.com"]}`)
+		case "/heartbeat":
+			if heartbeats.Add(1) == 1 {
+				fmt.Fprint(w, `{"status":"ok","aliases":["https://bad\u001b[31m.devrp.example.com"]}`)
+				return
+			}
+			fmt.Fprint(w, `{"status":"ok","aliases":["https://beta.devrp.example.com"]}`)
+		default:
+			fmt.Fprint(w, `{"status":"ok"}`)
+		}
+	}))
+	defer api.Close()
+	logPath := filepath.Join(dir, "output")
+	log, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	cmd := exec.Command(bin, "-s", api.URL, "--", "sh", "-c", `trap 'exit 0' TERM; while :; do sleep 1; done`)
+	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "SERVE_STATE="+filepath.Join(dir, "state"))
+	cmd.Stdout = log
+	cmd.Stderr = log
+	if err = cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = cmd.Process.Signal(os.Interrupt)
+		_ = cmd.Wait()
+	}()
+	waitFor(t, func() bool { return heartbeats.Load() >= 2 }, "alias heartbeats")
+	waitFor(t, func() bool {
+		data, _ := os.ReadFile(logPath)
+		return strings.Contains(string(data), "Alias removed: https://acme.devrp.example.com")
+	}, "alias change")
+	data, _ := os.ReadFile(logPath)
+	out := string(data)
+	for _, want := range []string{
+		"Alias added: https://acme.devrp.example.com",
+		"Ignoring invalid alias list from gateway.",
+		"Alias added: https://beta.devrp.example.com",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\x1b") {
+		t.Fatalf("gateway text reached the terminal:\n%s", out)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"syscall"
 	"time"
@@ -80,6 +81,30 @@ func Run(ctx context.Context, cfg Config, args []string) error {
 		return err
 	}
 	fmt.Fprintln(os.Stdout, "URL assigned:", assigned.URL)
+	var aliases []string
+	invalidAliases := false
+	showAliases := func(next []string) {
+		if !validAliases(assigned, next) {
+			if !invalidAliases {
+				fmt.Fprintln(os.Stderr, "Ignoring invalid alias list from gateway.")
+			}
+			invalidAliases = true
+			return
+		}
+		invalidAliases = false
+		for _, alias := range next {
+			if !slices.Contains(aliases, alias) {
+				fmt.Fprintln(os.Stdout, "Alias added:", alias)
+			}
+		}
+		for _, alias := range aliases {
+			if !slices.Contains(next, alias) {
+				fmt.Fprintln(os.Stdout, "Alias removed:", alias)
+			}
+		}
+		aliases = next
+	}
+	showAliases(assigned.Aliases)
 	var child *exec.Cmd
 	var childDone <-chan error
 	if len(args) > 0 {
@@ -131,8 +156,10 @@ func Run(ctx context.Context, cfg Config, args []string) error {
 				continue
 			}
 			if forwarder != nil {
-				_, err = api.call(ctx, publicationPath("heartbeat", cfg.ID, session), nil)
+				var beat publication.Response
+				beat, err = api.call(ctx, publicationPath("heartbeat", cfg.ID, session), nil)
 				if err == nil {
+					showAliases(beat.Aliases)
 					if !readinessRunning {
 						stopReady = startReadiness(ctx, cfg, assigned)
 						readinessRunning = true
@@ -189,6 +216,7 @@ func Run(ctx context.Context, cfg Config, args []string) error {
 			}
 			assigned = nextAssignment
 			fmt.Fprintln(os.Stdout, "Sharing reconnected:", assigned.URL)
+			showAliases(assigned.Aliases)
 			stopReady = startReadiness(ctx, cfg, assigned)
 			readinessRunning = true
 		}

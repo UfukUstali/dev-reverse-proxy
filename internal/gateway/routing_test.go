@@ -2,17 +2,20 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/UfukUstali/dev-reverse-proxy/internal/publication"
 	"github.com/UfukUstali/dev-reverse-proxy/internal/tailnet"
 	"gopkg.in/yaml.v3"
 )
@@ -533,5 +536,50 @@ func TestRoutingBodyTimeoutRetainsSnapshot(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > routingTimeout+time.Second {
 		t.Fatalf("poll exceeded its timeout: %v", elapsed)
+	}
+}
+
+func TestRoutingAliasesReportedToPublication(t *testing.T) {
+	g := routingGateway(t, time.Minute)
+	registerRoutingPublication(t, g, "app", "a", 20001)
+	f := &routingFixture{}
+	f.set(200, "application/json", `{"routes":[{"domain":"`+testAlias+`","appDomain":"app.`+testDomain+`"},{"domain":"second.`+testDomain+`","appDomain":"app.`+testDomain+`"},{"domain":"elsewhere.`+testDomain+`","appDomain":"other.`+testDomain+`"}]}`)
+	client := prepareRoutingPoll(t, g, f.server(t))
+	if err := g.refreshRouting(context.Background(), client); err != nil {
+		t.Fatal(err)
+	}
+	aliases := func(path, body string) []string {
+		t.Helper()
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
+		var result publication.Response
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &result) != nil {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+		return result.Aliases
+	}
+	heartbeat := "/heartbeat?id=app&session=" + strings.Repeat("a", 64)
+	both := []string{"https://second." + testDomain, "https://" + testAlias}
+	if got := aliases("/register", `{"id":"app","session":"`+strings.Repeat("a", 64)+`","port":20001}`); !slices.Equal(got, both) {
+		t.Fatalf("register aliases: %v", got)
+	}
+	if got := aliases(heartbeat, ""); !slices.Equal(got, both) {
+		t.Fatalf("heartbeat aliases: %v", got)
+	}
+	if got := aliases("/heartbeat?id=authcenter&session="+strings.Repeat("d", 64), ""); got != nil {
+		t.Fatalf("unrelated publication received aliases: %v", got)
+	}
+	// A publication that claims an alias hostname takes it away from the target.
+	registerRoutingPublication(t, g, "tenant", "b", 20002)
+	if got := aliases(heartbeat, ""); !slices.Equal(got, both[:1]) {
+		t.Fatalf("shadowed alias reported: %v", got)
+	}
+	controlCall(t, g, "/unregister?id=tenant&session="+strings.Repeat("b", 64), "")
+	f.set(200, "application/json", `{"routes":[]}`)
+	if err := g.refreshRouting(context.Background(), client); err != nil {
+		t.Fatal(err)
+	}
+	if got := aliases(heartbeat, ""); got != nil {
+		t.Fatalf("cleared aliases reported: %v", got)
 	}
 }

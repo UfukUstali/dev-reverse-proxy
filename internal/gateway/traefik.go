@@ -5,7 +5,6 @@ import (
 	"net"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -31,13 +30,7 @@ func (g *Gateway) writeConfig() error {
 		services[name] = map[string]any{"loadBalancer": map[string]any{"passHostHeader": true, "servers": []any{map[string]any{"url": "http://" + net.JoinHostPort(p.IP, strconv.Itoa(p.Port))}}, "responseForwarding": map[string]any{"flushInterval": "-1ms"}}}
 	}
 	for domain, id := range g.aliases {
-		p, ok := g.publications[id]
-		if !ok || !now.Before(p.Expires) {
-			continue
-		}
-		if other, ok := g.publications[strings.TrimSuffix(domain, "."+g.cfg.Domain)]; ok && now.Before(other.Expires) {
-			// Publication registrations always retain their own hostname, even if
-			// Authcenter previously imported that name as an alias.
+		if !g.aliasRouted(domain, id, now) {
 			continue
 		}
 		routers["devrp-alias-"+domain] = map[string]any{"entryPoints": []string{g.cfg.EntryPoint}, "rule": "Host(`" + domain + "`)", "service": "devrp-" + id, "tls": map[string]any{}, "middlewares": []string{"devrp-forwarding"}}

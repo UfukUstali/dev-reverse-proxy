@@ -144,7 +144,7 @@ func reply(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func (g *Gateway) response(p Publication) publication.Response {
-	return publication.Response{Status: "registered", URL: p.URL, Domain: g.cfg.Domain, PublicIP: g.cfg.PublicIP}
+	return publication.Response{Status: "registered", URL: p.URL, Domain: g.cfg.Domain, PublicIP: g.cfg.PublicIP, Aliases: g.aliasURLs(p.ID)}
 }
 func sessionKey(owner, session string) string { return owner + ":" + session }
 
@@ -253,7 +253,7 @@ func (g *Gateway) update(w http.ResponseWriter, r *http.Request, owner tailnet.I
 	if r.URL.Path == "/heartbeat" {
 		p.Expires = time.Now().Add(g.cfg.Lease)
 		g.publications[id] = p
-		reply(w, 200, publication.Response{Status: "ok"})
+		reply(w, 200, publication.Response{Status: "ok", Aliases: g.aliasURLs(id)})
 		return
 	}
 	// Retire before removing routes. A failed disk write must not allow stale heartbeats.

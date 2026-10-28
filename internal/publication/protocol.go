@@ -25,4 +25,7 @@ type Response struct {
 	Domain   string `json:"domain,omitempty"`
 	PublicIP string `json:"public_ip,omitempty"`
 	Message  string `json:"message,omitempty"`
+	// Aliases lists the Authcenter alias URLs currently routed to this
+	// publication. Register and heartbeat responses include it.
+	Aliases []string `json:"aliases,omitempty"`
 }

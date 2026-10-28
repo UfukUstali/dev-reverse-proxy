@@ -87,3 +87,18 @@ func validateAssignment(id string, r publication.Response) error {
 	}
 	return nil
 }
+
+// validAliases accepts only distinct single-label HTTPS URLs beneath the gateway
+// domain, so gateway-supplied text never reaches the terminal unchecked.
+func validAliases(r publication.Response, aliases []string) bool {
+	seen := map[string]bool{}
+	for _, alias := range aliases {
+		host, secure := strings.CutPrefix(alias, "https://")
+		label, inDomain := strings.CutSuffix(host, "."+r.Domain)
+		if !secure || !inDomain || !publication.ValidName(label) || alias == r.URL || seen[alias] {
+			return false
+		}
+		seen[alias] = true
+	}
+	return true
+}

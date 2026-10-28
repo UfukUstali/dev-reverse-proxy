@@ -11,6 +11,7 @@ import (
 	"maps"
 	"mime"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -137,6 +138,33 @@ func (g *Gateway) refreshRouting(ctx context.Context, client *http.Client) error
 		return fmt.Errorf("write routing snapshot: %w", err)
 	}
 	return nil
+}
+
+// aliasRouted reports whether an imported alias currently routes to its target.
+// The caller holds g.mu.
+func (g *Gateway) aliasRouted(domain, id string, now time.Time) bool {
+	p, ok := g.publications[id]
+	if !ok || !now.Before(p.Expires) {
+		return false
+	}
+	// Publication registrations always retain their own hostname, even if
+	// Authcenter previously imported that name as an alias.
+	other, ok := g.publications[strings.TrimSuffix(domain, "."+g.cfg.Domain)]
+	return !ok || !now.Before(other.Expires)
+}
+
+// aliasURLs lists the routed alias URLs of one publication in sorted order.
+// The caller holds g.mu.
+func (g *Gateway) aliasURLs(id string) []string {
+	now := time.Now()
+	var urls []string
+	for domain, target := range g.aliases {
+		if target == id && g.aliasRouted(domain, id, now) {
+			urls = append(urls, "https://"+domain)
+		}
+	}
+	slices.Sort(urls)
+	return urls
 }
 
 // routingObject rejects missing, unknown, case-mismatched and duplicate keys,

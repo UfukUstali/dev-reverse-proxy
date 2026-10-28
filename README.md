@@ -78,6 +78,8 @@ Alias hostnames must be exactly one lowercase DNS label beneath `PUBLIC_DOMAIN`,
 
 The gateway rejects all nested aliases, including `acme.templatefoobar.devrp.liuf.uk`, even when the target publication uses wildcard mode. It also rejects aliases equal to any application hostname named in the snapshot and external domains. Any rejected route rejects the entire snapshot and retains the previous accepted aliases. Supporting external domains would require an explicit DNS and certificate policy. Ordinary wildcard publications keep their existing routing behavior independently of Authcenter aliases.
 
+The CLI logs the aliases of its publication: `Alias added: <url>` after registration and whenever a heartbeat reports a new alias, and `Alias removed: <url>` when one disappears. New aliases therefore appear within one poll interval plus the five-second heartbeat. The CLI accepts only distinct `https://<label>.<PUBLIC_DOMAIN>` URLs other than its own and ignores any other list with a warning. Aliases overridden by a publication of the same name are not reported. Older CLIs ignore the field, and newer CLIs print no aliases against older gateways.
+
 Aliases retain the visitor's Host and Traefik's HTTPS forwarding metadata. Apps use the anchor hostname to select the tenant and OIDC realm. App-owned domains remain reserved server identities; Authcenter must not emit them as application routes. Ordinary publication routing continues to work, and consuming apps are responsible for rejecting own-domain requests that lack anchor context.
 
 ## Control API
@@ -92,7 +94,7 @@ Every endpoint requires an authenticated Tailscale peer with the `devrp.liuf.uk/
 | `GET /status` | Returns gateway domain and public IP |
 | `GET /clients` | Lists active publications, excluding session identifiers |
 
-The CLI generates a random session identifier for each publication attempt. Sessions scope ownership, idempotent registration, heartbeat, and removal. They are not configured credentials. Registration returns the HTTPS `url`, `domain`, and `public_ip`. An expired session receives `410` and requires a fresh session; a competing name receives `409`.
+The CLI generates a random session identifier for each publication attempt. Sessions scope ownership, idempotent registration, heartbeat, and removal. They are not configured credentials. Registration returns the HTTPS `url`, `domain`, and `public_ip`. Registration and heartbeat responses also carry `aliases`, the sorted Authcenter alias URLs currently routed to that publication; the field is omitted when there are none. An expired session receives `410` and requires a fresh session; a competing name receives `409`.
 
 ## Verification
 
